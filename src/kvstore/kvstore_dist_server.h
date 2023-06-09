@@ -26,6 +26,7 @@
 #include <mxnet/c_api.h>
 #include <mxnet/kvstore.h>
 #include <ps/ps.h>
+#include <ps/internal/message.h>
 #include <queue>
 #include <string>
 #include <mutex>
@@ -37,6 +38,7 @@
 #include "../profiler/profiler.h"
 #include "../operator/tensor/elemwise_binary_op-inl.h"
 #include "../operator/tensor/init_op.h"
+#include "my_thread_pool.h"
 
 namespace mxnet {
 namespace kvstore {
@@ -162,6 +164,9 @@ class KVStoreDistServer {
     static_cast<ps::SimpleApp*>(ps_server_)
         ->set_request_handle(std::bind(&KVStoreDistServer::CommandHandle, this, _1, _2));
     ps_server_->set_request_handle(std::bind(&KVStoreDistServer::DataHandleEx, this, _1, _2, _3));
+    if (dmlc::GetEnv("ENABLE_LEMETHOD", false)) {
+      threadPool_.set_max_thread_num(1);
+    }
     sync_mode_            = false;
     gradient_compression_ = std::make_shared<GradientCompression>();
     log_verbose_          = dmlc::GetEnv("MXNET_KVSTORE_DIST_ROW_SPARSE_VERBOSE", false);
@@ -325,10 +330,99 @@ class KVStoreDistServer {
     }
   }
 
+  void ModelDistribution(const ps::KVMeta reqMeta, ps::KVPairs<char> *kvs) {
+    iteration_++;
+    int lastBandwidth = -1;
+    int lastReceiver = -1;
+    int receiver = -1;
+    ps::Message msg;
+    msg.meta.app_id = 0;
+    msg.meta.customer_id = 0;
+    msg.meta.sender = ps::Postoffice::Get()->van()->my_node().id;
+    msg.meta.timestamp = reqMeta.timestamp;
+    msg.meta.control.cmd = ps::Control::MODEL_DISTRIBUTION;
+    msg.meta.key = reqMeta.key;
+    msg.meta.version = iteration_;
+    msg.AddData(kvs->keys);
+    msg.AddData(kvs->vals);
+    msg.AddData(kvs->lens);
+    delete kvs;
+    while (true) {
+      receiver = ps::Postoffice::Get()->van()->GetModelReceiver(lastBandwidth, lastReceiver, iteration_);
+      // std::cout << "MODEL DISTRIBUTION sender: " << msg.meta.sender << " receiver: " << receiver << std::endl;
+      if (receiver == -1) { break; }
+      msg.meta.recver = receiver;
+      clock_t startTime, endTime;
+      startTime = clock();
+      ps::Postoffice::Get()->van()->Send(msg);
+      ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
+      endTime = clock();
+      lastBandwidth = (int)(startTime - endTime) / CLOCKS_PER_SEC;
+      lastReceiver = receiver;
+    }
+  }
+
+
+  void LocalAggregation(const ps::KVMeta& reqMeta, const ps::KVPairs<char>& reqData, ps::KVServer<char>* server) {
+    CHECK_EQ(reqData.keys.size(), (size_t)1);
+    if (reqMeta.push) {
+      CHECK_EQ(reqData.lens.size(), (size_t)1);
+      CHECK_EQ(reqData.vals.size(), (size_t)reqData.lens[0]);
+    }
+    int key = DecodeKey(reqData.keys[0]);
+    DataHandleType type = DepairDataHandleType(reqMeta.cmd);
+    size_t ds[] = {(size_t)reqData.lens[0] / mshadow::mshadow_sizeof(type.dtype)};
+    mxnet::TShape dshape(ds, ds + 1);
+    TBlob recv_blob;
+    MSHADOW_REAL_TYPE_SWITCH(type.dtype, DType, {
+      recv_blob = TBlob(reinterpret_cast<DType*>(reqData.vals.data()), dshape, mxnet::cpu::kDevMask);
+    })
+    NDArray recved = NDArray(recv_blob, 0);
+    auto& stored = store_[key];
+    if (stored.is_none()) { // in fact, this is not needed, because when init(), stored will be initialized.
+      stored = NDArray(dshape, Context(), false, type.dtype);
+    }
+    if (num_aggregation_ == 0) {
+      CopyFromTo(recved, stored);
+    } else {
+      stored += recved;
+    }
+    stored.WaitToRead();
+    num_aggregation_ += reqMeta.num_aggregation;
+    if (num_aggregation_ == ps::NumWorkers()) {
+      CHECK(sync_mode_) << "LeMethod only support for sync mode";
+      ps::Postoffice::Get()->van()->NoticeWorkersOneIterationFinish();
+      num_aggregation_ = 0;
+      ps::KVPairs<char> *kvs = new ps::KVPairs<char>();
+      int len = stored.shape().Size() * mshadow::mshadow_sizeof(stored.dtype());
+      kvs->keys = reqData.keys;
+      kvs->vals.CopyFrom(static_cast<const char*>(stored.data().dptr_), len);
+      kvs->lens = {len};
+      threadPool_.enqueue(&KVStoreDistServer::ModelDistribution, this, reqMeta, kvs);
+    }
+  }
+
   void DataHandleEx(const ps::KVMeta& req_meta,
                     const ps::KVPairs<char>& req_data,
                     ps::KVServer<char>* server) {
     DataHandleType type = DepairDataHandleType(req_meta.cmd);
+    if (dmlc::GetEnv("ENABLE_LEMETHOD", false)) {
+      CHECK(type.requestType == RequestType::kDefaultPushPull) << "LeMethod only support DefaultPushPull.";
+      if (req_meta.control_cmd == ps::Control::LOCAL_AGGREGATION) {
+        LocalAggregation(req_meta, req_data, server);
+      } else if (req_meta.control_cmd == ps::Control::INIT) {
+        DataHandleDefault(type, req_meta, req_data, server);
+        ps::KVPairs<char> *kvs = new ps::KVPairs<char>();
+        int key = DecodeKey(req_data.keys[0]);
+        auto& stored = store_[key];
+        int len = stored.shape().Size() * mshadow::mshadow_sizeof(stored.dtype());
+        kvs->keys = req_data.keys;
+        kvs->vals.CopyFrom(static_cast<const char*>(stored.data().dptr_), len);
+        kvs->lens = {len};
+        threadPool_.enqueue(&KVStoreDistServer::ModelDistribution, this, req_meta, kvs);
+      }
+      return;
+    }
     switch (type.requestType) {
       case RequestType::kRowSparsePushPull:
         DataHandleRowSparse(type, req_meta, req_data, server);
@@ -858,6 +952,9 @@ class KVStoreDistServer {
    * currently there is no support for unsetting gradient compression
    */
   std::shared_ptr<kvstore::GradientCompression> gradient_compression_;
+  MyThreadPool threadPool_;
+  int num_aggregation_ = 0;
+  int iteration_ = 0;
 };
 
 }  // namespace kvstore

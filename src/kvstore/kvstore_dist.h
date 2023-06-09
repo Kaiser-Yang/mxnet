@@ -197,7 +197,7 @@ class KVStoreDist : public KVStoreLocal {
       InitKV(keys[i], values[i]);
     }
     if (get_rank() == 0 && this->ps_worker_->get_customer()->customer_id() == 0) {
-      Push_(keys, values, 0, false);
+      Push_(keys, values, 0, false, true);
       // wait until the push is finished
       for (const int key : keys) {
         comm_buf_[key].WaitToWrite();
@@ -342,7 +342,8 @@ class KVStoreDist : public KVStoreLocal {
   void Push_(const std::vector<int>& keys,
              const std::vector<NDArray>& values,
              int priority,
-             bool do_merge) {
+             bool do_merge,
+             bool isInit = false) {
     // first aggregate the values over keys
     std::vector<int> uniq_keys;
     std::vector<std::vector<NDArray>> grouped_vals;
@@ -378,7 +379,7 @@ class KVStoreDist : public KVStoreLocal {
       if (storage_type == kDefaultStorage) {
         if (gradient_compression_->get_type() == CompressionType::kNone) {
           PSKV& pskv = EncodeDefaultKey(key, comm_buf.shape().Size(), num_bytes);
-          PushDefault(key, comm_buf, pskv, priority);
+          PushDefault(key, comm_buf, pskv, priority, isInit);
         } else {
           CHECK_EQ(dtype, mshadow::kFloat32) << "Gradient compression is only supported for "
                                              << "float32 type of parameters";
@@ -391,22 +392,22 @@ class KVStoreDist : public KVStoreLocal {
           // we want inactive gc to send uncompressed gradients,
           // but sharded in the same way as later pushes would when gc becomes active
           if (is_active) {
-            PushCompressed(key, comm_buf, pskv, priority);
+            PushCompressed(key, comm_buf, pskv, priority, isInit);
           } else {
-            PushDefault(key, comm_buf, pskv, priority);
+            PushDefault(key, comm_buf, pskv, priority, isInit);
           }
         }
       } else if (storage_type == kRowSparseStorage) {
         CHECK(gradient_compression_->get_type() == CompressionType::kNone)
             << "Gradient compression for row sparse storage type is not supported";
-        PushRowSparse(key, comm_buf, priority);
+        PushRowSparse(key, comm_buf, priority, isInit);
       } else {
         LOG(FATAL) << "unknown storage type";
       }
     }
   }
 
-  virtual void PushCompressed(int key, const NDArray& comm_buf, const PSKV& pskv, int priority) {
+  virtual void PushCompressed(int key, const NDArray& comm_buf, const PSKV& pskv, int priority, bool isInit = false) {
     auto& small_buf            = compr_buf_[key];
     auto& res_buf              = residual_[key];
     const size_t original_size = comm_buf.shape().Size();
@@ -420,16 +421,16 @@ class KVStoreDist : public KVStoreLocal {
       res_buf = 0;
     }
     gradient_compression_->Quantize(comm_buf, &small_buf, &res_buf, priority);
-    auto push_to_servers = [this, key, dtype, pskv, small_buf](RunContext rctx,
-                                                               Engine::CallbackOnStart on_start,
-                                                               Engine::CallbackOnComplete cb) {
+    auto push_to_servers = [this, key, dtype, pskv, small_buf, isInit](RunContext rctx,
+                                                                       Engine::CallbackOnStart on_start,
+                                                                       Engine::CallbackOnComplete cb) {
       on_start();
       size_t size = small_buf.shape().Size() * mshadow::mshadow_sizeof(dtype);
       char* data  = static_cast<char*>(small_buf.data().dptr_);
       // do push. false means no delete
       ps::SArray<char> vals(data, size, false);
       int cmd = GetCommandType(RequestType::kCompressedPushPull, dtype);
-      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); });
+      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); }, 0, isInit, key);
     };
     // acquire locks on both comm_buf and small_buf so that
     // pull (which uses comm_buf) for the same key waits till push finishes
@@ -442,10 +443,10 @@ class KVStoreDist : public KVStoreLocal {
                              "KVStoreDistCompressedPush");
   }
 
-  virtual void PushDefault(int key, const NDArray& send_buf, const PSKV& pskv, int priority) {
-    auto push_to_servers = [this, key, pskv, send_buf](RunContext rctx,
-                                                       Engine::CallbackOnStart on_start,
-                                                       Engine::CallbackOnComplete cb) {
+  virtual void PushDefault(int key, const NDArray& send_buf, const PSKV& pskv, int priority, bool isInit = false) {
+    auto push_to_servers = [this, key, pskv, send_buf, isInit](RunContext rctx,
+                                                               Engine::CallbackOnStart on_start,
+                                                               Engine::CallbackOnComplete cb) {
       on_start();
       const int dtype = send_buf.dtype();
       // convert to ps keys
@@ -454,7 +455,7 @@ class KVStoreDist : public KVStoreLocal {
       // do push. false means no delete
       ps::SArray<char> vals(data, size, false);
       int cmd = GetCommandType(RequestType::kDefaultPushPull, dtype);
-      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); });
+      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); }, 0, isInit, key);
     };
     Engine::Get()->PushAsync(push_to_servers,
                              pinned_ctx_,
@@ -466,11 +467,11 @@ class KVStoreDist : public KVStoreLocal {
   }
 
   // push row sparse gradient
-  virtual void PushRowSparse(int key, const NDArray& send_buf, int priority) {
+  virtual void PushRowSparse(int key, const NDArray& send_buf, int priority, bool isInit = false) {
     using namespace rowsparse;
-    auto push_to_servers = [this, key, send_buf](RunContext rctx,
-                                                 Engine::CallbackOnStart on_start,
-                                                 Engine::CallbackOnComplete cb) {
+    auto push_to_servers = [this, key, send_buf, isInit](RunContext rctx,
+                                                         Engine::CallbackOnStart on_start,
+                                                         Engine::CallbackOnComplete cb) {
       on_start();
       char* data             = static_cast<char*>(send_buf.data().dptr_);
       const int64_t num_rows = send_buf.aux_shape(kIdx)[0];
@@ -487,7 +488,7 @@ class KVStoreDist : public KVStoreLocal {
       }
       ps::SArray<char> vals(data, size * num_bytes, false);
       const int cmd = GetCommandType(RequestType::kRowSparsePushPull, send_buf.dtype());
-      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); });
+      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); }, 0, isInit, key);
     };
     Engine::Get()->PushAsync(push_to_servers,
                              pinned_ctx_,
@@ -518,10 +519,17 @@ class KVStoreDist : public KVStoreLocal {
                              RequestType::kCompressedPushPull :
                              RequestType::kDefaultPushPull;
       const int cmd = GetCommandType(mode, dtype);
-      CHECK_NOTNULL(ps_worker_)->ZPull(pskv.keys, vals, &pskv.lens, cmd, [vals, cb]() {
-        delete vals;
-        cb();
-      });
+      if (dmlc::GetEnv("ENABLE_LEMETHOD", false)) {
+        CHECK_NOTNULL(ps_worker_)->PullFromReceiveKvs(key, vals, &pskv.lens, cmd, [vals, cb]() {
+          delete vals;
+          cb();
+        });
+      } else {
+        CHECK_NOTNULL(ps_worker_)->ZPull(pskv.keys, vals, &pskv.lens, cmd, [vals, cb]() {
+          delete vals;
+          cb();
+        });
+      }
     };
 
     CHECK_NOTNULL(Engine::Get())

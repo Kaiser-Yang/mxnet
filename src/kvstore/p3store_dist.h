@@ -73,11 +73,11 @@ class P3StoreDist : public KVStoreDist {
     EncodeDefaultKey(key, value.shape().Size(), mshadow::mshadow_sizeof(value.dtype()));
   }
 
-  void PushCompressed(int key, const NDArray& comm_buf, const PSKV& pskv, int priority) final {
+  void PushCompressed(int key, const NDArray& comm_buf, const PSKV& pskv, int priority, bool isInit = false) final {
     LOG(FATAL) << "NotImplementedError: PushCompressed not implemented in P3StoreDist.";
   }
 
-  void PushDefault(int key, const NDArray& send_buf, const PSKV& pskv, int priority) override {
+  void PushDefault(int key, const NDArray& send_buf, const PSKV& pskv, int priority, bool isInit = false) override {
     auto push_to_servers = [this, key, pskv, send_buf, priority](RunContext rctx,
                                                                  Engine::CallbackOnStart on_start,
                                                                  Engine::CallbackOnComplete cb) {
@@ -120,7 +120,7 @@ class P3StoreDist : public KVStoreDist {
                              "P3StoreDistDefaultPush");
   }
 
-  void PushRowSparse(int key, const NDArray& send_buf, int priority) override {
+  void PushRowSparse(int key, const NDArray& send_buf, int priority, bool isInit = false) override {
     LOG(FATAL) << "NotImplementedError: PushRowSparse not implemented in P3StoreDist.";
   }
 
