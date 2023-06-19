@@ -39,6 +39,7 @@ std::atomic<int> mxnet::kvstore::KVStoreDist::customer_id_{0};
 namespace mxnet {
 
 KVStore* KVStore::Create(const char* type_name) {
+  CHECK(!(dmlc::GetEnv("ENABLE_LEMETHOD", false) && dmlc::GetEnv("ENABLE_TSENGINE", false))) << "you can not assign ENABLE_LEMETHOD and ENABLE_TSENGINE with 1 at the same time.";
   std::string tname = type_name;
   std::transform(tname.begin(), tname.end(), tname.begin(), ::tolower);
   KVStore* kv          = nullptr;

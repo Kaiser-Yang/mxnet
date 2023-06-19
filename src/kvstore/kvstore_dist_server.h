@@ -440,6 +440,54 @@ class KVStoreDistServer {
     return multi_precision_ && type.dtype != mshadow::kFloat32;
   }
 
+  inline void ApplyUpdatesDefault(const DataHandleType type, const int key,
+                                  UpdateBuf *update_buf, int& storev,
+                                  const ps::KVMeta& req_meta, const ps::KVPairs<char> &req_data,
+                                  ps::KVServer<char>* server) {
+    if (!sync_mode_ || update_buf->request.size() == (size_t) ps::NumWorkers()) {
+      update_buf->merged.WaitToRead();
+      auto& stored = has_multi_precision_copy(type) ? store_realt_[key] : store_[key];
+      auto& update = sync_mode_ ? update_buf->merged : update_buf->temp_array;
+      if (updater_) {
+        exec_.Exec([this, key, &update, &stored](){
+          CHECK(updater_);
+          updater_(key, update, &stored);
+        });
+      } else {
+        CHECK(sync_mode_) << "Updater needs to be set for async mode";
+        CopyFromTo(update_buf->merged, &stored);
+      }
+      update_buf->request.clear();
+      storev++;
+      if (has_multi_precision_copy(type)) CopyFromTo(stored, store_[key]);
+      stored.WaitToRead();
+      DefaultAutoPull(type, key, store_v_[key], req_meta, req_data, server);
+    } else {
+      update_buf->merged.WaitToRead();
+    }
+  }
+
+  void DefaultAutoPull(const DataHandleType type,
+                       const int key,
+                       const int version,
+                       const ps::KVMeta& req_meta,
+                       const ps::KVPairs<char> &req_data,
+                       ps::KVServer<char>* server) {
+    CHECK(type.requestType == RequestType::kDefaultPushPull);
+    ps::KVPairs<char> response;
+    const NDArray& stored = store_[key];
+    CHECK(!stored.is_none()) << "init " << key << " first";
+
+    // as server returns when store_realt is ready in this case
+    if (has_multi_precision_copy(type)) stored.WaitToRead();
+
+    auto len = stored.shape().Size() * mshadow::mshadow_sizeof(stored.dtype());
+    response.keys = req_data.keys;
+    response.lens = {len};
+    response.vals.CopyFrom(static_cast<const char*>(stored.data().dptr_), len);
+    server->AutoPullUpdate(version, req_meta, response);
+  }
+
   inline void ApplyUpdates(const DataHandleType type,
                            const int key,
                            const ps::KVPairs<char>& req_data,
@@ -842,6 +890,7 @@ class KVStoreDistServer {
     // could be deallocated when this function returns. so we need to make sure
     // the operators with \a NDArray are actually finished
     if (req_meta.push) {
+      if (dmlc::GetEnv("ENABLE_TSENGINE", false)) { server->Response(req_meta); }
       size_t ds[] = {(size_t)req_data.lens[0] / mshadow::mshadow_sizeof(type.dtype)};
       mxnet::TShape dshape(ds, ds + 1);
       TBlob recv_blob;
@@ -856,7 +905,7 @@ class KVStoreDistServer {
                          false,
                          has_multi_precision_copy(type) ? mshadow::kFloat32 : type.dtype);
         CopyFromTo(recved, &stored, 0);
-        server->Response(req_meta);
+        if (!dmlc::GetEnv("ENABLE_TSENGINE", false)) { server->Response(req_meta); }
         if (has_multi_precision_copy(type)) {
           auto& stored_dtype = store_[key];
           stored_dtype       = NDArray(dshape, Context(), false, type.dtype);
@@ -864,6 +913,10 @@ class KVStoreDistServer {
           stored_dtype.WaitToRead();
         }
         stored.WaitToRead();
+        if (dmlc::GetEnv("ENABLE_TSENGINE", false)) {
+          store_v_[key] = 0;
+          DefaultAutoPull(type, key, store_v_[key], req_meta, req_data, server);
+        }
       } else {
         auto& updates = update_buf_[key];
         if (sync_mode_ && updates.merged.is_none()) {
@@ -894,8 +947,13 @@ class KVStoreDistServer {
             updates.merged += recved;
           }
         }
-        updates.request.push_back(req_meta);
-        ApplyUpdates(type, key, req_data, &updates, server);
+        if (dmlc::GetEnv("ENABLE_TSENGINE", false)) {
+          for (int i = 0; i < req_meta.num_merge; i++) updates.request.push_back(req_meta);
+          ApplyUpdatesDefault(type, key, &updates, store_v_[key], req_meta, req_data, server);
+        } else {
+          updates.request.push_back(req_meta);
+          ApplyUpdates(type, key, req_data, &updates, server);
+        }
       }
     } else {
       DefaultStorageResponse(type, key, req_meta, req_data, server);
@@ -955,6 +1013,7 @@ class KVStoreDistServer {
   MyThreadPool threadPool_;
   int num_aggregation_ = 0;
   int iteration_ = 0;
+  std::unordered_map<int, int> store_v_;
 };
 
 }  // namespace kvstore

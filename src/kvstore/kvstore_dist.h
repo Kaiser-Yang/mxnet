@@ -27,6 +27,10 @@
 #include <vector>
 #include <algorithm>
 #include <utility>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <queue>
 #include "./kvstore_local.h"
 #include "mxnet/engine.h"
 #include "ps/ps.h"
@@ -47,6 +51,10 @@ class KVStoreDist : public KVStoreLocal {
     if (IsWorkerNode()) {
       int new_customer_id = GetNewCustomerId();
       ps_worker_          = new ps::KVWorker<char>(0, new_customer_id);
+      if (dmlc::GetEnv("ENABLE_TSENGINE", false)) {
+        using namespace std::placeholders;
+        ps_worker_->set_request_handle(std::bind(&KVStoreDist::WorkersMerge, this, _1, _2, _3));
+      }
       ps::StartAsync(new_customer_id, "mxnet\0");
       if (!ps::Postoffice::Get()->is_recovery()) {
         ps::Postoffice::Get()->Barrier(new_customer_id,
@@ -70,6 +78,68 @@ class KVStoreDist : public KVStoreLocal {
       }
       ps::Finalize(ps_worker_->get_customer()->customer_id(), barrier_before_exit_);
       delete ps_worker_;
+    }
+  }
+
+  void WorkersMerge(const ps::KVMeta &req_meta, const ps::KVPairs<char> &req_data, ps::KVWorker<char> *worker) {
+    if (req_meta.num_merge == -1){ //it's time to send push request
+      std::unique_lock<std::mutex> send_lk(send_mu);
+      int key=send_q.front();
+      req_data_buf[key].vals.CopyFrom(static_cast<const char*>(update_buf_[key].merged.data().dptr_),
+                                      req_data_buf[key].lens[0]);
+      update_buf_[key].merged.WaitToRead();
+      ps_worker_->Send2(req_meta_buf[key].timestamp, req_meta_buf[key].push,
+                        req_meta_buf[key].cmd, req_data_buf[key], req_meta_buf[key].key ,
+                        req_meta_buf[key].version, req_meta_buf[key].app_id,
+                        req_meta_buf[key].customer_id,req_meta_buf[key].num_merge);
+      send_q.pop();
+    } else { //keep superimposing workers' push request msg
+      // do some check
+      CHECK_EQ(req_data.keys.size(), (size_t)1);
+      if (req_meta.push) {
+        CHECK_EQ(req_data.lens.size(), (size_t)1);
+        CHECK_EQ(req_data.vals.size(), (size_t)req_data.lens[0]);
+      }
+      int key = req_data.keys[0];
+      DataHandleType type = DepairDataHandleType(req_meta.cmd);
+
+      std::unique_lock<std::mutex> send_lk(send_mu);
+      if (req_meta.sender!=(ps::MyRank()*2+9)) { worker->Response(req_meta); }
+      else {
+        send_q.push(req_data.keys[0]);
+        req_meta_buf[req_data.keys[0]].cmd       = req_meta.cmd;
+        req_meta_buf[req_data.keys[0]].push      = req_meta.push;
+        req_meta_buf[req_data.keys[0]].sender    = req_meta.sender;
+        req_meta_buf[req_data.keys[0]].timestamp = req_meta.timestamp ;
+        req_meta_buf[req_data.keys[0]].customer_id = req_meta.customer_id ;
+        req_meta_buf[req_data.keys[0]].app_id = req_meta.app_id;
+        req_meta_buf[req_data.keys[0]].key = req_meta.key;
+        req_meta_buf[req_data.keys[0]].version = req_meta.version;
+        req_meta_buf[req_data.keys[0]].num_merge = req_meta.num_merge;
+
+        req_data_buf[req_data.keys[0]].keys = req_data.keys;
+        req_data_buf[req_data.keys[0]].lens = req_data.lens;
+      }
+      size_t ds[] = {(size_t) req_data.lens[0] / mshadow::mshadow_sizeof(type.dtype)};
+      TShape dshape(ds, ds + 1); //tensor.shape, tensor.shape+tensor.dim
+      TBlob recv_blob;
+      MSHADOW_REAL_TYPE_SWITCH(type.dtype, DType, {
+        recv_blob = TBlob(reinterpret_cast<DType*>(req_data.vals.data()), dshape, cpu::kDevMask);
+      })
+      NDArray recved = NDArray(recv_blob, 0);
+      auto &updates = update_buf_[key];
+      if (updates.merged.is_none()) {
+        updates.merged = NDArray(dshape, Context(), false, type.dtype);
+      }
+      if (req_meta.sender==(ps::MyRank()*2+9)) {
+        updates.merged = recved;
+        updates.merged.WaitToRead();
+      }
+      else {
+        updates.merged += recved;
+        updates.merged.WaitToRead();
+        req_meta_buf[req_data.keys[0]].num_merge+=req_meta.num_merge;
+      }
     }
   }
 
@@ -185,6 +255,18 @@ class KVStoreDist : public KVStoreLocal {
   std::unordered_map<int, ComprPSKV> compr_ps_kv_;
 
  private:
+  struct UpdateBuf {
+    std::vector<ps::KVMeta> request;
+    NDArray merged;
+    NDArray temp_array;
+  };
+
+  std::unordered_map<int, ps::KVPairs<char>> req_data_buf;
+  std::unordered_map<int, ps::KVMeta> req_meta_buf;
+  std::queue<int> send_q;
+  std::unordered_map<int, UpdateBuf> update_buf_;
+  std::mutex send_mu;
+  std::unordered_map<int, int> data_version_;
   static std::atomic<int> customer_id_;
 
   static int GetNewCustomerId() {
@@ -455,7 +537,7 @@ class KVStoreDist : public KVStoreLocal {
       // do push. false means no delete
       ps::SArray<char> vals(data, size, false);
       int cmd = GetCommandType(RequestType::kDefaultPushPull, dtype);
-      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); }, 0, isInit, key);
+      CHECK_NOTNULL(ps_worker_)->ZPush(pskv.keys, vals, pskv.lens, cmd, [cb]() { cb(); }, 0, isInit, key, key, data_version_[key]);
     };
     Engine::Get()->PushAsync(push_to_servers,
                              pinned_ctx_,
@@ -524,6 +606,11 @@ class KVStoreDist : public KVStoreLocal {
           delete vals;
           cb();
         });
+      } else if (dmlc::GetEnv("ENABLE_TSENGINE", false)) {
+        data_version_[key] = CHECK_NOTNULL(ps_worker_)->AutoPull(key, pskv.keys, vals, &pskv.lens, cmd);
+        // because we need get the return value, so the cb() should be below.
+        delete vals;
+        cb();
       } else {
         CHECK_NOTNULL(ps_worker_)->ZPull(pskv.keys, vals, &pskv.lens, cmd, [vals, cb]() {
           delete vals;
