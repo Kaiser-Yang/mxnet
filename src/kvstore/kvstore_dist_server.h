@@ -39,6 +39,7 @@
 #include "../operator/tensor/elemwise_binary_op-inl.h"
 #include "../operator/tensor/init_op.h"
 #include "my_thread_pool.h"
+#include "ps/internal/van.h"
 
 namespace mxnet {
 namespace kvstore {
@@ -332,9 +333,9 @@ class KVStoreDistServer {
 
   void ModelDistribution(const ps::KVMeta reqMeta, ps::KVPairs<char> *kvs) {
     iteration_++;
-    int lastBandwidth = -1;
-    int lastReceiver = -1;
-    int receiver = -1;
+    int lastBandwidth = ps::Van::UNKNOWN;
+    int lastReceiver = ps::Van::UNKNOWN;
+    int receiver = ps::Van::UNKNOWN;
     ps::Message msg;
     msg.meta.app_id = 0;
     msg.meta.customer_id = 0;
@@ -349,15 +350,14 @@ class KVStoreDistServer {
     delete kvs;
     while (true) {
       receiver = ps::Postoffice::Get()->van()->GetModelReceiver(lastBandwidth, lastReceiver, iteration_);
-      // std::cout << "MODEL DISTRIBUTION sender: " << msg.meta.sender << " receiver: " << receiver << std::endl;
-      if (receiver == -1) { break; }
+      if (receiver == ps::Van::QUIT) { break; }
       msg.meta.recver = receiver;
       clock_t startTime, endTime;
       startTime = clock();
       ps::Postoffice::Get()->van()->Send(msg);
       ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
       endTime = clock();
-      lastBandwidth = (int)(startTime - endTime) / CLOCKS_PER_SEC;
+      lastBandwidth = (long long)(startTime - endTime) / CLOCKS_PER_SEC;
       lastReceiver = receiver;
     }
   }

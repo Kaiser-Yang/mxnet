@@ -172,3 +172,6 @@ cmake_options.yml
 # header file generated at compile time
 include/onednn/oneapi/dnnl/dnnl_version.h
 include/onednn/oneapi/dnnl/dnnl_config.h
+
+# clangd cache
+.cache/
