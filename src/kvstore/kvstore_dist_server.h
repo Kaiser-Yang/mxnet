@@ -39,6 +39,7 @@
 #include "../operator/tensor/elemwise_binary_op-inl.h"
 #include "../operator/tensor/init_op.h"
 #include "my_thread_pool.h"
+#include "ps/internal/postoffice.h"
 #include "ps/internal/van.h"
 
 namespace mxnet {
@@ -348,6 +349,7 @@ class KVStoreDistServer {
     msg.AddData(kvs->vals);
     msg.AddData(kvs->lens);
     delete kvs;
+    using ps::Postoffice; // for PS_VLOG
     while (true) {
       receiver = ps::Postoffice::Get()->van()->GetModelReceiver(lastBandwidth, lastReceiver, iteration_);
       if (receiver == ps::Van::QUIT) { break; }
@@ -357,7 +359,13 @@ class KVStoreDistServer {
       ps::Postoffice::Get()->van()->Send(msg);
       ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
       endTime = clock();
-      lastBandwidth = (long long)(startTime - endTime) / CLOCKS_PER_SEC;
+      PS_VLOG(-1) << "node " << msg.meta.sender << " model distribution startTime: "
+                  << startTime << " endTime: " << endTime;
+      // startTime and endTime may be large,
+      // but the result of startTime - endTime could be small.
+      // therefore we use int type to storage.
+      // for example, even it takes 20 minutes to send, the result is -1.2e9
+      lastBandwidth = (int)(startTime - endTime);
       lastReceiver = receiver;
     }
   }
