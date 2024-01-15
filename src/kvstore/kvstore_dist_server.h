@@ -359,8 +359,7 @@ class KVStoreDistServer {
       ps::Postoffice::Get()->van()->Send(msg);
       ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
       endTime = clock();
-      PS_VLOG(-1) << "node " << msg.meta.sender << " model distribution startTime: "
-                  << startTime << " endTime: " << endTime;
+      ps::LEMETHOD_LOG(-1, "node", msg.meta.sender, "model distribution startTime:", startTime, "endTime:", endTime);
       // startTime and endTime may be large,
       // but the result of startTime - endTime could be small.
       // therefore we use int type to storage.
