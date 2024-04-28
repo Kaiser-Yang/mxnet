@@ -333,6 +333,7 @@ class KVStoreDistServer {
   }
 
   void ModelDistribution(const ps::KVMeta reqMeta, ps::KVPairs<char> *kvs) {
+    iteration_++;
     int lastBandwidth = ps::Van::UNKNOWN;
     int lastReceiver = ps::Van::UNKNOWN;
     int receiver = ps::Van::UNKNOWN;
@@ -366,7 +367,6 @@ class KVStoreDistServer {
       lastBandwidth = (int)(startTime - endTime);
       lastReceiver = receiver;
     }
-    iteration_++;
   }
 
 
