@@ -355,10 +355,10 @@ class KVStoreDistServer {
       if (receiver == ps::Van::QUIT) { break; }
       msg.meta.recver = receiver;
       clock_t startTime, endTime;
-      startTime = clock();
+      startTime = time(nullptr);
       ps::Postoffice::Get()->van()->Send(msg);
       ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
-      endTime = clock();
+      endTime = time(nullptr);
       ps::LEMETHOD_LOG(-1, "node", msg.meta.sender, "model distribution startTime:", startTime, "endTime:", endTime);
       // startTime and endTime may be large,
       // but the result of startTime - endTime could be small.
