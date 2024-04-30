@@ -28,6 +28,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)  # GNU extensions used by src/operator/random/shuffle_op.cc
 
+# control debug infomation for lemethod
+option(LEMETHOD_NO_DEBUG "whether or not use lemethod debug." off)
+if (LEMETHOD_NO_DEBUG)
+  add_compile_definitions(LEMETHOD_NO_DEBUG)
+endif()
+
 # Sanity checks for some popular compilers. Make sure their version is
 # sufficient. Cmake also automatically checks if a compiler supports c++17. But
 # some compilers claim they support c++17 without actually implementing crucial
