@@ -366,7 +366,8 @@ class KVStoreDistServer {
       lastBandwidth = int(diff.count() * 1000000);
       ps::LEMETHOD_LOG(-1, "node", msg.meta.sender,
                        "model distribution startTime:",
-                       startTime, "endTime:", endTime,
+                       (double)startTime.time_since_epoch().count(),
+                       "endTime:", (double)endTime.time_since_epoch().count(),
                        "lastBandwidth:", lastBandwidth);
       lastReceiver = receiver;
     }
