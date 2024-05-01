@@ -358,16 +358,16 @@ class KVStoreDistServer {
       ps::Postoffice::Get()->van()->Send(msg);
       ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
       auto endTime = std::chrono::high_resolution_clock::now();
-      const std::chrono::duration<double> diff = endTime - startTime;
-      ps::LEMETHOD_LOG(-1, "node", msg.meta.sender,
-                       "model distribution startTime:",
-                       startTime, "endTime:", endTime,
-                       "diff:", diff);
+      const std::chrono::duration<double> diff = startTime - endTime ;
       // startTime and endTime may be large,
       // but the result of startTime - endTime could be small.
       // therefore we use int type to storage.
       // for example, even it takes 20 minutes to send, the result is -1.2e9
       lastBandwidth = int(diff.count() * 1000000);
+      ps::LEMETHOD_LOG(-1, "node", msg.meta.sender,
+                       "model distribution startTime:",
+                       startTime, "endTime:", endTime,
+                       "lastBandwidth:", lastBandwidth);
       lastReceiver = receiver;
     }
   }
