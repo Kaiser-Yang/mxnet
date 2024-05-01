@@ -35,6 +35,7 @@
 #include <functional>
 #include <future>
 #include <vector>
+#include <chrono>
 #include "../profiler/profiler.h"
 #include "../operator/tensor/elemwise_binary_op-inl.h"
 #include "../operator/tensor/init_op.h"
@@ -349,22 +350,24 @@ class KVStoreDistServer {
     msg.AddData(kvs->vals);
     msg.AddData(kvs->lens);
     delete kvs;
-    using ps::Postoffice; // for PS_VLOG
     while (true) {
       receiver = ps::Postoffice::Get()->van()->GetModelReceiver(lastBandwidth, lastReceiver, iteration_);
       if (receiver == ps::Van::QUIT) { break; }
       msg.meta.recver = receiver;
-      clock_t startTime, endTime;
-      startTime = time(nullptr);
+      auto startTime = std::chrono::high_resolution_clock::now();
       ps::Postoffice::Get()->van()->Send(msg);
       ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
-      endTime = time(nullptr);
-      ps::LEMETHOD_LOG(-1, "node", msg.meta.sender, "model distribution startTime:", startTime, "endTime:", endTime);
+      auto endTime = std::chrono::high_resolution_clock::now();
+      const std::chrono::duration<double> diff = endTime - startTime;
+      ps::LEMETHOD_LOG(-1, "node", msg.meta.sender,
+                       "model distribution startTime:",
+                       startTime, "endTime:", endTime,
+                       "diff:", diff);
       // startTime and endTime may be large,
       // but the result of startTime - endTime could be small.
       // therefore we use int type to storage.
       // for example, even it takes 20 minutes to send, the result is -1.2e9
-      lastBandwidth = (int)(startTime - endTime);
+      lastBandwidth = int(diff.count() * 1000000);
       lastReceiver = receiver;
     }
   }
