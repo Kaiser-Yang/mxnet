@@ -517,16 +517,16 @@ if(USE_JEMALLOC)
   endif()
 endif()
 
-include(CTest)
-set(GTEST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/googletest/googletest")
-set(GTEST_INCLUDE_DIR ${GTEST_ROOT}/include)
-set(GTEST_MAIN_LIBRARY gtest_main)
-set(GTEST_LIBRARY gtest)
-
-add_subdirectory(${GTEST_ROOT})
-set_target_properties(gtest PROPERTIES CXX_CLANG_TIDY "")  # don't lint 3rdparty dependency
-set_target_properties(gtest_main PROPERTIES CXX_CLANG_TIDY "")  # don't lint 3rdparty dependency
-find_package(GTest REQUIRED)
+# Disable building GTEST
+# include(CTest)
+# set(GTEST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/googletest/googletest")
+# set(GTEST_INCLUDE_DIR ${GTEST_ROOT}/include)
+# set(GTEST_MAIN_LIBRARY gtest_main)
+# set(GTEST_LIBRARY gtest)
+# add_subdirectory(${GTEST_ROOT})
+# set_target_properties(gtest PROPERTIES CXX_CLANG_TIDY "")  # don't lint 3rdparty dependency
+# set_target_properties(gtest_main PROPERTIES CXX_CLANG_TIDY "")  # don't lint 3rdparty dependency
+# find_package(GTest REQUIRED)
 
 # cudnn detection
 if(USE_CUDNN)
