@@ -364,9 +364,7 @@ class KVStoreDistServer {
       // therefore we use int type to storage.
       // for example, even it takes 20 minutes to send, the result is -1.2e9
       lastBandwidth = int(diff.count() * 1000000);
-      ps::LEMETHOD_LOG(-1, "node", msg.meta.sender,
-                       "model distribution ",
-                       "lastBandwidth:", lastBandwidth);
+      LOG(INFO) << "node " << msg.meta.sender << " model distribution lastBandwidth: " << lastBandwidth;
       lastReceiver = receiver;
     }
   }
@@ -400,7 +398,7 @@ class KVStoreDistServer {
     num_aggregation_ += reqMeta.num_aggregation;
     if (num_aggregation_ == ps::NumWorkers()) {
       CHECK(sync_mode_) << "LeMethod only support for sync mode";
-      ps::Postoffice::Get()->van()->NoticeWorkersOneIterationFinish();
+      ps::Postoffice::Get()->van()->NotifyWorkersOneIterationFinish();
       num_aggregation_ = 0;
       ps::KVPairs<char> *kvs = new ps::KVPairs<char>();
       int len = stored.shape().Size() * mshadow::mshadow_sizeof(stored.dtype());

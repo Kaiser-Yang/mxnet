@@ -691,6 +691,8 @@ if(USE_CUDA)
 
   include_directories(${CUDAToolkit_INCLUDE_DIRS})
   link_directories(${CUDAToolkit_LIBRARY_DIR})
+else()
+  add_definitions(-DMXNET_USE_CUDA=0)
 endif()
 
 if(CUDAToolkit_VERSION_MAJOR LESS "11")
