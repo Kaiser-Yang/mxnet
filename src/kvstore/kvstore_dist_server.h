@@ -167,9 +167,6 @@ class KVStoreDistServer {
     static_cast<ps::SimpleApp*>(ps_server_)
         ->set_request_handle(std::bind(&KVStoreDistServer::CommandHandle, this, _1, _2));
     ps_server_->set_request_handle(std::bind(&KVStoreDistServer::DataHandleEx, this, _1, _2, _3));
-    if (dmlc::GetEnv("ENABLE_LEMETHOD", false)) {
-      threadPool_.set_max_thread_num(1);
-    }
     sync_mode_            = false;
     gradient_compression_ = std::make_shared<GradientCompression>();
     log_verbose_          = dmlc::GetEnv("MXNET_KVSTORE_DIST_ROW_SPARSE_VERBOSE", false);
@@ -405,7 +402,8 @@ class KVStoreDistServer {
       kvs->keys = reqData.keys;
       kvs->vals.CopyFrom(static_cast<const char*>(stored.data().dptr_), len);
       kvs->lens = {len};
-      threadPool_.enqueue(&KVStoreDistServer::ModelDistribution, this, reqMeta, kvs);
+      std::thread t(&KVStoreDistServer::ModelDistribution, this, reqMeta, kvs);
+      t.detach();
     }
   }
 
@@ -426,7 +424,8 @@ class KVStoreDistServer {
         kvs->keys = req_data.keys;
         kvs->vals.CopyFrom(static_cast<const char*>(stored.data().dptr_), len);
         kvs->lens = {len};
-        threadPool_.enqueue(&KVStoreDistServer::ModelDistribution, this, req_meta, kvs);
+        std::thread t(&KVStoreDistServer::ModelDistribution, this, req_meta, kvs);
+        t.detach();
       }
       return;
     }
@@ -1017,7 +1016,6 @@ class KVStoreDistServer {
    * currently there is no support for unsetting gradient compression
    */
   std::shared_ptr<kvstore::GradientCompression> gradient_compression_;
-  MyThreadPool threadPool_;
   int num_aggregation_ = 0;
   int iteration_ = 0;
   std::unordered_map<int, int> store_v_;
