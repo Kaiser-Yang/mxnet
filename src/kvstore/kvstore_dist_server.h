@@ -361,7 +361,6 @@ class KVStoreDistServer {
       // therefore we use int type to storage.
       // for example, even it takes 20 minutes to send, the result is -1.2e9
       lastBandwidth = int(diff.count() * 1000000);
-      LOG(INFO) << "node " << msg.meta.sender << " model distribution lastBandwidth: " << lastBandwidth;
       lastReceiver = receiver;
     }
   }
