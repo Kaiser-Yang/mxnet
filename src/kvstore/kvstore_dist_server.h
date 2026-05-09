@@ -332,9 +332,6 @@ class KVStoreDistServer {
 
   void ModelDistribution(const ps::KVMeta reqMeta, ps::KVPairs<char> *kvs) {
     iteration_++;
-    int lastBandwidth = ps::Van::UNKNOWN;
-    int lastReceiver = ps::Van::UNKNOWN;
-    int receiver = ps::Van::UNKNOWN;
     ps::Message msg;
     msg.meta.app_id = 0;
     msg.meta.customer_id = 0;
@@ -347,24 +344,43 @@ class KVStoreDistServer {
     msg.AddData(kvs->vals);
     msg.AddData(kvs->lens);
     delete kvs;
-    while (true) {
-      receiver = ps::Postoffice::Get()->van()->GetModelReceiver(lastBandwidth, lastReceiver, iteration_);
-      if (receiver == ps::Van::QUIT) { break; }
-      msg.meta.recver = receiver;
-      auto startTime = std::chrono::high_resolution_clock::now();
-      ps::Postoffice::Get()->van()->Send(msg);
-      ps::Postoffice::Get()->van()->WaitForModelDistributionReply();
-      auto endTime = std::chrono::high_resolution_clock::now();
-      const std::chrono::duration<double> diff = startTime - endTime ;
-      // startTime and endTime may be large,
-      // but the result of startTime - endTime could be small.
-      // therefore we use int type to storage.
-      // for example, even it takes 20 minutes to send, the result is -1.2e9
-      lastBandwidth = int(diff.count() * 1000000);
-      lastReceiver = receiver;
+
+    auto enable_distribution = dmlc::GetEnv("ENABLE_DISTRIBUTION", true);
+
+    auto send_and_wait = [this](ps::Message &msg, int receiver, int iteration) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        ps::Postoffice::Get()->van()->Send(msg);
+        ps::Postoffice::Get()->van()->WaitForModelDistributionReply(receiver);
+        auto endTime = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<double> diff = startTime - endTime;
+        // Update the bandwidth
+        ps::Postoffice::Get()->van()->GetModelReceiver(int(diff.count() * 1000000), receiver, iteration);
+    };
+
+    if (enable_distribution) {
+        while (true) {
+            int receiver = ps::Postoffice::Get()->van()->GetModelReceiver(ps::Van::UNKNOWN, ps::Van::UNKNOWN, iteration_);
+            if (receiver == ps::Van::QUIT) break;
+            msg.meta.recver = receiver;
+            send_and_wait(msg, receiver, iteration_);
+        }
+    } else {
+        std::vector<std::thread> threads;
+        while (true) {
+            int receiver = ps::Postoffice::Get()->van()->GetModelReceiver(ps::Van::UNKNOWN, ps::Van::UNKNOWN, iteration_);
+            if (receiver == ps::Van::QUIT) break;
+            // Copy the message
+            ps::Message m = msg;
+            m.meta.recver = receiver;
+            threads.emplace_back([send_and_wait](ps::Message msg, int receiver, int iteration){
+                send_and_wait(msg, receiver, iteration);
+            }, m, receiver, iteration_);
+        }
+        for (auto& t : threads) {
+            if (t.joinable()) t.join();
+        }
     }
   }
-
 
   void LocalAggregation(const ps::KVMeta& reqMeta, const ps::KVPairs<char>& reqData, ps::KVServer<char>* server) {
     CHECK_EQ(reqData.keys.size(), (size_t)1);
